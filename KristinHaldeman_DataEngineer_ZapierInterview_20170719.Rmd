@@ -1,0 +1,171 @@
+---
+title: "Zapier Interview Project"
+output: html_document
+author: Kristin Haldeman
+date: July 19, 2017
+---
+
+## Introduction: 
+This is the interview project of Kristin Haldeman for the position of Data 
+Engineer/Analyst at Zapier. Throughout each step, I try to thoroughly detail
+my thoughts throughout all steps. I chose an RMD format so that you could see
+code, results, and explanations continuously. I take on a more professional tone 
+instep 3, leaving out extraneous details and focusing on presenting the findings.
+
+## Step 1: Ingest data
+
+This was a step that I performed outside of R and will summarize. I downloaded 
+and installed PostgreSQL and set up a database server on my local machine. Using 
+pgAdmin4, I connected to the database, and then copied the table
+into my local database by making a backup of the Zapier table. I loaded it into 
+my local database by then running the sql insert commands from the backup. 
+
+However, I got stuck on the last part - I could never quite get the sql insert 
+commands to load from the backup. And in the interest of both 'default to action'
+and the fact that I simply ran out of time due to me leaving for vacation for the
+next two weeks. I therefore exported the data via pgAdmin4 from the Zapier
+database into a csv file, and went from there. The InsertZapier.sql file 
+inside InsertZapier.zip contains the sql commands I had backed up from the
+Zapier database
+
+## Step 2: ETL
+First open a Postgresql connection and load data, if I had a table with data in 
+it in my local database. Since I don't, I'll leave this here for how it would 
+have worked, and do a simple read.csv instead
+
+
+```{r,eval=FALSE}
+### create a connection
+pw <- "haldeman921"
+ 
+### loads the PostgreSQL driver
+drv <- dbDriver("PostgreSQL")
+# creates a connection to the postgres database
+con <- dbConnect(drv, dbname = "postgres",
+                 host = "localhost", port = 5432,
+                 user = "openpg", password = pw)
+rm(pw) # removes the password
+
+### load the data
+tasks <- sqldf("select * from postgres.tasks_used")
+```
+
+```{r}
+tasks = read.csv("tasks_used.csv")
+
+```
+
+At first I just did some basic summarization and data checking. Sanity checks 
+are always in order before starting an analysis of the data, and gives me a good
+background for proceeding with the analysis, debugging, and answering questions 
+that might come up later by those looking at the analysis. These calculations
+can be found in the Exploration.R file. Are the number
+of unique users (299522) more than the number of unique accounts (299419)? 
+Yup, multiple users for a few accounts, this makes sense. Whats the time frame
+of the data? January 1 - June 4 2017, so we have about 5 months of data to work
+with. A summary of tasks used per day shows us that we only have entries if at 
+least one task was performed on a day - no data means no tasks performed -  
+something I assumed by looking at the data, but I am glad I checked on. A
+histogram of tasks/day and log(tasks/day) gives us an expected exponential
+decline in this variable. 
+
+Next I start transforming this data into what I will use for visualizations
+
+```{r,eval=FALSE}
+#### create daily time series table for use in analysis
+startday = tasks[1,]$date
+endday = tasks[dim(tasks)[1],]$date
+daysequence = seq.Date(from=startday,to=endday,by="days") 
+tasks.ts.colnames = c("Date","UsersToDate","ActiveUsers",
+                      "ChurnUsers","ActiveUserTasksToDate",
+                      "ChurnUsersTasksToDate")
+tasks.ts = as.data.frame(matrix(nrow=length(daysequence),
+                                ncol=length(tasks.ts.colnames)))
+names(tasks.ts) = tasks.ts.colnames
+tasks.ts$Date = daysequence
+
+
+for (idate in 1:length(daysequence)) {
+  currDate = tasks.ts[idate,]$Date
+  # make a subset of data that shows all activity up to current date
+  tasks.subset.date = tasks[tasks$date<=currDate,]
+  tasks.ts[idate,]$UsersToDate = length(unique(tasks.subset.date$user_id))
+  
+  # subset above data to show only activity in past 27 days (active)
+  tasks.subset.Active = 
+    tasks.subset.date[tasks.subset.date$date >= currDate-27,]
+  tasks.ts[idate,]$ActiveUsers = length(unique(tasks.subset.Active$user_id))
+  # get active users activity out of tasks.subset.date
+  tasks.ts[idate,]$ActiveUserTasksToDate = 
+    sum(tasks.subset.date[tasks.subset.date$user_id %in% 
+                            unique(tasks.subset.Active$user_id),]$tasks_used_per_day)
+  
+  # subset above data to show only activity in past 27 to 56 days (churn)
+  tasks.subset.Churn = 
+    tasks.subset.date[tasks.subset.date$date < currDate-27 & 
+                        tasks.subset.date$date >= currDate-55,]
+  # number of users in Churn time and not in Active time
+  churntimeUsers = unique(tasks.subset.Churn$user_id)
+  activetimeUsers = unique(tasks.subset.Active$user_id)
+  tasks.ts[idate,]$ChurnUsers = length(unique(c(churntimeUsers,activetimeUsers))) -
+    length(setdiff(churntimeUsers,activetimeUsers)) #churntimeUsers not in ActivetimeUsers
+  
+    
+  # get churn users activity out of tasks.subset.date
+  tasks.ts[idate,]$ChurnUsersTasksToDate = 
+    sum(tasks.subset.date[tasks.subset.date$user_id %in% 
+                            unique(tasks.subset.Churn$user_id),]$tasks_used_per_day)
+
+}
+
+
+```
+
+loading this data from previous calculations, since it takes a few minutes to
+calculate
+
+```{r}
+load("tasksTS.RData")
+tasks.ts$ChurnRate = tasks.ts$ChurnUsers/tasks.ts$ActiveUsers*100
+```
+
+
+
+
+## Step 3: Visualization for Internal Stakeholders
+
+While we have data beginning from January 1, we can only accurately calculate
+churn from 56 days into the reporting period - the beginning of March. Therefor,
+the plots below only look at the time period.
+
+In the below plot we look at how daily churn rate is affected over time. The
+blue line represents a best fit line, while the grey area depicts the confidence
+interval. We see a general increase in Churn Rate over time, but there's a lot 
+of noise here. Notice that churn rate tends to take a dip in the middle of the 
+month (at least in April and May, while it rises continuously in March).
+
+
+```{r}
+library("ggplot2")
+ggplot(tasks.ts[60:155,], aes(x=Date, y=ChurnRate)) + geom_point(shape=1) + geom_smooth(method=lm) +
+  labs(title="Churn Rate vs Linear Regression Fit over time",y="Churn Rate in %")  + theme(plot.title = element_text(hjust = 0.5))
+```
+
+
+In the next plot, we look at the number of active users over time. In this plot,
+we definitely see a clear rise in active users over time!
+
+
+
+```{r}
+ggplot(tasks.ts[60:155,], aes(x=Date, y=ActiveUsers)) + geom_point(shape=1) + geom_smooth(method=lm) +
+  labs(title="Active vs Linear Regression Fit over time")  + theme(plot.title = element_text(hjust = 0.5))
+```
+
+
+## Step 4: Things I would like to do, given more data and time.
+1. Use a better churn rate: https://blog.recurly.com/2014/08/better-way-to-calculate-your-churn-rate
+2. Do some time series analysis, preferably with multiple years, since we really need a 60 day lead time for unbiased data, leaving us with only 3 months worth of unbiased data currently
+3. Subset by user length - are users who have been active for a while less likely to churn compared to users that have only been active for a short time. Again, a longer series of data is needed for this. 
+4. Look at higher granality of time - weeks or months. 
+5. How does number of tasks/day affect churn?
